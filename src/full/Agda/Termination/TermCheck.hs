@@ -1,4 +1,3 @@
-
 {-# LANGUAGE ImplicitParams             #-}
 {-# LANGUAGE NondecreasingIndentation   #-}
 
@@ -78,6 +77,9 @@ import qualified Agda.Utils.VarSet as VarSet
 
 import Agda.Utils.Impossible
 
+import Debug.Trace
+import qualified Agda.Syntax.Concrete.Name as C
+
 -- | Call graph with call info for composed calls.
 
 type Calls = CallGraph CallPath
@@ -92,7 +94,9 @@ type Result = [TerminationError]
 --   Precondition: 'envMutualBlock' must be set correctly.
 
 termDecl :: A.Declaration -> TCM Result
-termDecl d = inTopContext $ termDecl' d
+termDecl d = do
+  -- traceShowM "TermDecl!"
+  inTopContext $ termDecl' d
 
 
 -- | Termination check a single declaration
@@ -103,8 +107,12 @@ termDecl' = \case
     A.Axiom {}            -> return mempty
     A.Field {}            -> return mempty
     A.Primitive {}        -> return mempty
-    A.Mutual i ds         -> termMutual $ getNames ds
-    A.Section _ _ _ _ ds  -> termDecls ds
+    A.Mutual i ds         -> do
+      -- traceShowM "Mutual"
+      termMutual $ getNames ds
+    A.Section _ _ _ _ ds  -> do
+      -- traceShowM "Section"
+      termDecls ds
         -- section structure can be ignored as we are termination checking
         -- definitions lifted to the top-level
     A.Apply {}            -> return mempty
@@ -118,7 +126,9 @@ termDecl' = \case
     A.ScopedDecl scope ds -> {- withScope_ scope $ -} termDecls ds
         -- scope is irrelevant as we are termination checking Syntax.Internal
     A.RecSig{}            -> return mempty
-    A.RecDef _ x _ _ _ _ ds -> termMutual [x] <> termDecls ds
+    A.RecDef _ x _ _ _ _ ds -> do
+        -- traceShowM "recdef"
+        termMutual [x] <> termDecls ds
         -- Andreas, 2022-10-23, issue #5823
         -- Also check record types for termination.
         -- They are unfolded during construction of unique inhabitants of eta-records.
@@ -185,6 +195,7 @@ termMutual names0 = ifNotM (optTerminationCheck <$> pragmaOptions) (return mempt
       forM_ allNames $ \ q -> setTerminates q $ Just False
       return mempty
   else do
+    -- traceShowM ("termMutual, check termination for: " ++ prettyShow names)
     sccs <- do
       -- Andreas, 2016-10-01 issue #2231
       -- Recursivity checker has to see through abstract definitions!
@@ -202,6 +213,7 @@ termMutual names0 = ifNotM (optTerminationCheck <$> pragmaOptions) (return mempt
     -- Actual termination checking needed: go through SCCs.
     concat <$> do
      forM sccs $ \ allNames -> do
+
 
      -- Andreas, 2025-05-31, AIM XL, re issue #7906:
      -- Clear previous information about termination to avoid loops in the termination checker.
@@ -277,9 +289,12 @@ termMutual' = do
 
   -- collect all recursive calls in the block
   allNames <- terGetMutual
+  -- traceShowM ("term mutual'", prettyShow allNames)
+
   let collect :: TerM Calls
       collect = forM' allNames termDef
 
+  -- This does the actual termination checking given the call graph
   r <- withOrWithoutDotPatterns (const True) collect
 
   -- @names@ is taken from the 'Abstract' syntax, so it contains only
@@ -371,10 +386,8 @@ reportCalls no calls = do
 
 termFunction :: QName -> TerM Result
 termFunction name = inConcreteOrAbstractMode name $ \ def -> do
-
   -- Function @name@ is henceforth referred to by its @index@
   -- in the list of @allNames@ of the mutual block.
-
   allNames <- terGetMutual
   let index = fromMaybe __IMPOSSIBLE__ $ Set.lookupIndex name allNames
 
@@ -388,6 +401,7 @@ termFunction name = inConcreteOrAbstractMode name $ \ def -> do
     _ -> typeEndsInDef (defType def) <&> \case
            Just d  -> TargetDef d
            Nothing -> TargetOther
+
   reportTarget target
   terSetTarget target $ do
 
@@ -469,6 +483,7 @@ typeEndsInDef t = liftTCM $ do
 --   consider dot patterns or not.
 termDef :: QName -> TerM Calls
 termDef name = terSetCurrent name $ inConcreteOrAbstractMode name $ \ def -> do
+ -- traceShowM ("termDef: ", prettyShow name) --, " ++ ", prettyShow def)
 
  -- Skip calls to record types unless we are checking a record type in the first place.
  let isRecord_ = case theDef def of { Record{} -> True; _ -> False }
@@ -508,17 +523,52 @@ termDef name = terSetCurrent name $ inConcreteOrAbstractMode name $ \ def -> do
             then return empty
             else termClause cl
 
+
+        Datatype{ dataCons } -> do
+          -- traceShowM ("hit ctor", prettyShow name)
+          graphs <- forM dataCons $ \ctorName -> do
+
+            (piArguments, piReturn) <- uncurryPi . defType <$>
+                                        getConstInfo ctorName
+            let returnTypeCtorArgs = case unEl piReturn of
+                  -- Alecs: The return type of the constuctor should
+                  -- always be a data constructor application
+                  Def _ apps -> map (\case Apply a -> unArg a; _ -> __IMPOSSIBLE__) apps
+                  _          -> __IMPOSSIBLE__
+            -- traceShowM ("args", prettyShow returnTypeCtorArgs)
+            -- traceShowM ("args", returnTypeCtorArgs)
+
+
+            -- Bring in the scope the whole Pi argument telescope,
+            -- this is actually pretty awkward as some of the
+            -- variables are not actually in scope when looking at
+            -- every argument that is not the last one
+            addContext piArguments $ do
+              -- Contruct the pattern from the return type indexes
+              pat <- mapM termToPattern returnTypeCtorArgs >>= maskNonDataArgs
+              -- traceShowM ("PAtern", pat)
+              terSetPatterns pat $ do
+                graphs <- forM piArguments $ \arg -> do
+                  let ?pos = PPositive
+                  let ?pol = Allow
+                  extract $ unDom arg
+                pure $ mconcat graphs
+          pure $ mconcat graphs
+
         -- @record R pars : Set where field tel@
         -- is treated like function @R pars = tel@.
         Record{ recPars, recTel } -> termRecTel recPars recTel
 
         _ -> return empty
 
+
 -- | Extract "calls" to the field types from a record constructor telescope.
 -- Does not extract from the parameters, but treats these as the "pattern variables"
 -- (the lhs of the "function").
 termRecTel :: Nat -> Telescope -> TerM Calls
 termRecTel npars tel = do
+  let ?pos = PPositive
+  let ?pol = Disallow
   -- Set up the record parameters like function parameters.
   let (pars, fields) = splitAt npars $ telToList tel
   addContext pars $ do
@@ -632,7 +682,8 @@ instance TermToPattern Term DeBruijnPattern where
       ConP c noConPatternInfo . map (fmap unnamed) <$> termToPattern (fromMaybe __IMPOSSIBLE__ $ allApplyElims args)
     Def s [Apply arg] -> do
       suc <- terGetSizeSuc
-      if Just s == suc then ConP (ConHead s IsData Inductive []) noConPatternInfo . map (fmap unnamed) <$> termToPattern [arg]
+      if Just s == suc then ConP (ConHead s IsData Inductive []) noConPatternInfo . map (fmap unnamed) <$>
+         termToPattern [arg]
        else fallback
     DontCare t  -> termToPattern t -- OR: __IMPOSSIBLE__  -- removed by stripAllProjections
     -- Leaves.
@@ -689,18 +740,29 @@ termClause clause = do
     , nest 2 $ "tel =" <+> prettyTCM tel
     , nest 2 $ "ps  =" <+> do addContext tel $ prettyTCMPatternList ps
     ]
+  -- traceShowM ("in clause body: ", prettyShow body)
   forM' body $ \ v -> addContext tel $ do
+
+    -- traceShowM ("telescope", prettyShow tel)
+    -- traceShowM ("Pattern", prettyShow ps)
+
     -- TODO: combine the following two traversals, avoid full normalisation.
     -- Parse dot patterns as patterns as far as possible.
     ps <- postTraversePatternM parseDotP ps
     -- Blank out coconstructors.
     ps <- preTraversePatternM stripCoCon ps
+
+    -- traceShowM ("in clause body: ", prettyShow ps)
     -- Mask non-data arguments.
     mdbpats <- maskNonDataArgs $ map namedArg ps
     terSetPatterns mdbpats $ do
       terSetSizeDepth tel $ do
         reportBody v
-        extract v
+        let ?pos = PPositive
+        let ?pol = Disallow
+        f <- extract v
+        -- traceShowM ("extracted ", prettyShow f)
+        return f
 
   where
     parseDotP = \case
@@ -720,10 +782,21 @@ termClause clause = do
             , nest 2 $ "rhs:" <+> prettyTCM v
             ]
 
+data PPosition
+  = PNegative | PPositive
+  deriving (Eq, Show)
+
+swapPosition :: PPosition -> PPosition
+swapPosition PNegative = PPositive
+swapPosition PPositive = PNegative
+
+data NonTerPolicy
+  = Allow | Disallow
+  deriving (Eq, Show)
 
 -- | Extract recursive calls from expressions.
 class ExtractCalls a where
-  extract :: a -> TerM Calls
+  extract :: (?pol :: NonTerPolicy, ?pos :: PPosition) => a -> TerM Calls
 
 instance ExtractCalls a => ExtractCalls (Abs a) where
   extract (NoAbs _ a) = extract a
@@ -788,7 +861,8 @@ instance ExtractCalls a => ExtractCalls (Tele a) where
 -- | Extract recursive calls from a constructor application.
 
 constructor
-  :: QName
+  :: (?pol :: NonTerPolicy, ?pos :: PPosition)
+  => QName
     -- ^ Constructor name.
   -> Induction
     -- ^ Should the constructor be treated as inductive or coinductive?
@@ -809,12 +883,16 @@ constructor c ind args = do
 
 -- | Handles function applications @g es@.
 
-function :: QName -> Elims -> TerM Calls
+function :: (?pol :: NonTerPolicy, ?pos :: PPosition)
+         => QName -> Elims -> TerM Calls
 function g es0 = do
-
+    -- Alecs: I can treat this as a black box g name of the ctor and
+    --        es0 the arguments to it
     f       <- terGetCurrent
     names   <- terGetMutual
     guarded <- terGetGuarded
+
+    -- traceShowM ("Guard", prettyShow g)
 
     -- let gArgs = Def g es0
     liftTCM $ reportSDoc "term.function" 30 $
@@ -830,6 +908,7 @@ function g es0 = do
     -- Collect calls in the arguments of this call.
     let args = map unArg $ argsFromElims es0
     calls <- forM' (zip guards args) $ \ (guard, a) -> do
+      let ?pos = PNegative
       terSetGuarded guard $ extract a
 
     -- Then, consider call gArgs itself.
@@ -839,14 +918,17 @@ function g es0 = do
           , nest 2 $ "to" <+> prettyTCM g
           ]
 
+    -- traceShowM ("params", ?pos, ?pol)
+    if ?pos == PPositive && ?pol == Allow then pure calls
     -- insert this call into the call list
-    case Set.lookupIndex g names of
+    else case Set.lookupIndex g names of
 
        -- call leads outside the mutual block and can be ignored
        Nothing   -> return calls
 
        -- call is to one of the mutally recursive functions/record
        Just gInd -> do
+         -- traceShowM ("it is actually recursive")
          cutoff <- terGetCutOff
          let ?cutoff = cutoff
 
@@ -1005,6 +1087,7 @@ tryReduceNonRecursiveClause g es continue fallback = do
 
 instance ExtractCalls Term where
   extract t = do
+    -- traceShowM ("extracting: ", prettyShow t)
     reportSDoc "term.check.term" 50 $ do
       "looking for calls in" <+> prettyTCM t
 
@@ -1013,6 +1096,7 @@ instance ExtractCalls Term where
 
       -- Constructed value.
       Con ConHead{conName = c, conDataRecord = dataOrRec} _ es -> do
+
         let args = fromMaybe __IMPOSSIBLE__ $ allApplyElims es
         -- A constructor preserves the guardedness of all its arguments.
         -- Andreas, 2022-09-19, issue #6108:
@@ -1041,7 +1125,9 @@ instance ExtractCalls Term where
         constructor c ind argsg
 
       -- Function, data, or record type.
-      Def g es -> tryReduceNonRecursiveClause g es extract $ function g es
+      Def g es -> do
+        -- traceShowM ("Def ", prettyShow g, " ", prettyShow es)
+        tryReduceNonRecursiveClause g es extract $ function g es
 
       -- Abstraction. Preserves guardedness.
       Lam h b -> extract b
@@ -1053,12 +1139,19 @@ instance ExtractCalls Term where
       Pi a (Abs x b) ->
         CallGraph.union <$>
         extract a <*> do
-          a <- maskSizeLt a  -- OR: just do not add a to the context!
+          a <- do  let currPos = ?pos
+                   let ?pos = swapPosition currPos
+                   maskSizeLt a  -- OR: just do not add a to the context!
           addContext (x, a) $ terRaise $ extract b
 
       -- Non-dependent function space.
-      Pi a (NoAbs _ b) ->
-        CallGraph.union <$> extract a <*> extract b
+      Pi a (NoAbs _ b) -> do
+        arg <- do
+            let currPos = ?pos
+            let ?pos = swapPosition currPos
+            extract a
+        ret <- extract b
+        pure $ CallGraph.union arg ret
 
       -- Literal.
       Lit l -> return empty

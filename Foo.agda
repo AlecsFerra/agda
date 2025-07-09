@@ -1,0 +1,45 @@
+module Foo where
+
+data Unit : Set where
+  tt : Unit
+
+data Nat : Set where
+   z : Nat
+   s : Nat -> Nat
+
+sub : Nat -> Nat
+sub z = z
+sub (s x) = x
+
+data Giga : Nat -> Set where
+   mkG : (n : Nat) -> Giga n -> Giga n
+
+data GigaBad : Nat -> Set where
+   mkG : (n : Nat) -> (GigaBad n -> Unit) -> GigaBad n
+
+data GigaBadGood : Nat -> Set where
+   mkG : (n : Nat) -> (GigaBadGood n -> Unit) -> GigaBadGood (s n)
+
+f : Unit -> Unit -> Unit
+f tt x = f x tt
+
+data Ty : Set where
+  ι : Ty
+  _⇒_ : Ty → Ty → Ty
+
+data Ctx : Set where
+  ∅   : Ctx
+  _,_ : Ctx → Ty → Ctx
+
+variable
+  Γ : Ctx
+  τ τ₁ τ₂ : Ty
+
+data Ref : Ctx → Ty → Set where
+  here : Ref (Γ , τ) τ
+  there : Ref Γ τ₁ → Ref (Γ , τ₂) τ₁
+
+data HOAS : Ctx → Ty → Set where
+  varr : Ref Γ τ → HOAS Γ τ
+  app : HOAS Γ (τ₁ ⇒ τ₂) → HOAS Γ τ₁ → HOAS Γ τ₂
+  lam : (HOAS Γ τ₁ → HOAS Γ τ₂) → HOAS Γ (τ₁ ⇒ τ₂)

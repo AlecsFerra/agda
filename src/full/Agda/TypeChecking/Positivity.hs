@@ -60,6 +60,9 @@ import Agda.Utils.Size
 
 import Agda.Utils.Impossible
 
+
+import Debug.Trace
+
 type Graph n e = Graph.Graph n e
 
 -- | Check that the datatypes in the mutual block containing the given
@@ -166,7 +169,7 @@ checkStrictlyPositive mi qset = do
         -- ASR (23 December 2015). We don't raise a strictly positive
         -- error if the NO_POSITIVITY_CHECK pragma was set on in the
         -- mutual block. See Issue 1614.
-        when (Info.mutualPositivityCheck mi == YesPositivityCheck) $
+        when (False && Info.mutualPositivityCheck mi == YesPositivityCheck) $
           whenM positivityCheckEnabled $
             case loop of
             Just o | o <= JustPos ->

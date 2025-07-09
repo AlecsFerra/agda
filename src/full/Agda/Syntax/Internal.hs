@@ -1,4 +1,3 @@
-
 module Agda.Syntax.Internal
     ( module Agda.Syntax.Internal
     , module Agda.Syntax.Internal.Blockers
@@ -1038,6 +1037,13 @@ arity :: Type -> Nat
 arity t = case unEl t of
   Pi  _ b -> 1 + arity (unAbs b)
   _       -> 0
+
+-- | Uncurry a Pi
+-- unCurryPi A -> (B -> (C -> D)) === ([A, B, C], D)
+uncurryPi :: Type -> ([Dom Type], Type)
+uncurryPi t = case unEl t of
+  Pi dom cod -> (dom : args, ret) where (args, ret) = uncurryPi $ unAbs cod
+  _          -> ([], t)
 
 -- | Suggest a name if available (i.e. name is not "_")
 class Suggest a where
