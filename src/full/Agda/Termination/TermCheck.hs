@@ -58,7 +58,7 @@ import Agda.TypeChecking.Telescope
 
 import qualified Agda.Benchmarking as Benchmark
 import Agda.TypeChecking.Monad.Benchmark (billTo, billPureTo)
-import Agda.TypeChecking.Positivity.Occurrence
+import Agda.TypeChecking.Polarity
 
 import Agda.Interaction.Options
 
@@ -759,14 +759,12 @@ data PPosition
   = PNegative | PPositive
   deriving (Eq, Show)
 
-flipPosition :: Occurrence -> PPosition -> PPosition
-flipPosition JustNeg   PPositive = PNegative
-flipPosition JustNeg   PNegative = PPositive
-flipPosition JustPos   pos       = pos
-flipPosition StrictPos pos       = pos
-flipPosition Mixed     _         = PNegative
-flipPosition Unused    pos       = PPositive
-flipPosition GuardPos  pos       = PPositive
+flipPosition :: Polarity -> PPosition -> PPosition
+flipPosition Contravariant PPositive = PNegative
+flipPosition Contravariant PNegative = PPositive
+flipPosition Covariant     pos       = pos
+flipPosition Invariant     _         = PNegative
+flipPosition Nonvariant    _         = PPositive
 
 data NonTerPolicy
   = Allow | Disallow
@@ -885,7 +883,7 @@ function g es0 = do
     calls <- forM' (zip3 guards args [0..]) $ \ (guard, a, pos) -> do
       -- Here I get the polarity
       pol <- liftTCM $ getArgOccurrence g pos
-      let ?pos = flipPosition pol ?pos
+      let ?pos = flipPosition (polFromOcc pol) ?pos
       terSetGuarded guard $ extract a
 
     -- Then, consider call gArgs itself.
@@ -1115,14 +1113,14 @@ instance ExtractCalls Term where
         CallGraph.union <$>
         extract a <*> do
           a <- do
-            let ?pos = flipPosition JustNeg ?pos
+            let ?pos = flipPosition Contravariant ?pos
             maskSizeLt a  -- OR: just do not add a to the context!
           addContext (x, a) $ terRaise $ extract b
 
       -- Non-dependent function space.
       Pi a (NoAbs _ b) -> do
         arg <- do
-          let ?pos = flipPosition JustNeg ?pos
+          let ?pos = flipPosition Contravariant ?pos
           extract a
         ret <- extract b
         pure $ CallGraph.union arg ret

@@ -14,6 +14,9 @@ sub (s x) = x
 Nega : Set -> Set
 Nega x = x -> Unit
 
+Pos : Set -> Set
+Pos x = Unit -> x
+
 data Giga : Nat -> Set where
    mkG : (n : Nat) -> Giga n -> Giga n
 
