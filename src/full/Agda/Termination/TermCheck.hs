@@ -13,7 +13,7 @@ module Agda.Termination.TermCheck
     , termMutual
     , Result
     ) where
-
+import Debug.Trace
 import Prelude hiding ( null )
 
 import Control.Applicative  ( liftA2 )
@@ -58,6 +58,7 @@ import Agda.TypeChecking.Telescope
 
 import qualified Agda.Benchmarking as Benchmark
 import Agda.TypeChecking.Monad.Benchmark (billTo, billPureTo)
+import Agda.TypeChecking.Positivity.Occurrence
 
 import Agda.Interaction.Options
 
@@ -758,9 +759,14 @@ data PPosition
   = PNegative | PPositive
   deriving (Eq, Show)
 
-swapPosition :: PPosition -> PPosition
-swapPosition PNegative = PPositive
-swapPosition PPositive = PNegative
+flipPosition :: Occurrence -> PPosition -> PPosition
+flipPosition JustNeg   PPositive = PNegative
+flipPosition JustNeg   PNegative = PPositive
+flipPosition JustPos   pos       = pos
+flipPosition StrictPos pos       = pos
+flipPosition Mixed     _         = PNegative
+flipPosition Unused    pos       = PPositive
+flipPosition GuardPos  pos       = PPositive
 
 data NonTerPolicy
   = Allow | Disallow
@@ -867,7 +873,7 @@ function g es0 = do
     liftTCM $ reportSDoc "term.function" 30 $
       "termination checking function call " <+> prettyTCM (Def g es0)
 
-    -- First, look for calls in the arguments of the call gArgs.
+    -- First, look for calls in the arguments of tge call gArgs.
 
     -- If the function is a projection but not for a coinductive record,
     -- then preserve guardedness for its principal argument.
@@ -876,9 +882,10 @@ function g es0 = do
     let guards = applyWhen isProj (guarded :) unguards
     -- Collect calls in the arguments of this call.
     let args = map unArg $ argsFromElims es0
-    calls <- forM' (zip guards args) $ \ (guard, a) -> do
-      -- Here I should actually look at the positivity of the argument
-      let ?pos = PNegative
+    calls <- forM' (zip3 guards args [0..]) $ \ (guard, a, pos) -> do
+      -- Here I get the polarity
+      pol <- liftTCM $ getArgOccurrence g pos
+      let ?pos = flipPosition pol ?pos
       terSetGuarded guard $ extract a
 
     -- Then, consider call gArgs itself.
@@ -1108,14 +1115,14 @@ instance ExtractCalls Term where
         CallGraph.union <$>
         extract a <*> do
           a <- do
-            let ?pos = swapPosition ?pos
+            let ?pos = flipPosition JustNeg ?pos
             maskSizeLt a  -- OR: just do not add a to the context!
           addContext (x, a) $ terRaise $ extract b
 
       -- Non-dependent function space.
       Pi a (NoAbs _ b) -> do
         arg <- do
-          let ?pos = swapPosition ?pos
+          let ?pos = flipPosition JustNeg ?pos
           extract a
         ret <- extract b
         pure $ CallGraph.union arg ret

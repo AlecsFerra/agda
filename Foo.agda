@@ -11,11 +11,17 @@ sub : Nat -> Nat
 sub z = z
 sub (s x) = x
 
+Nega : Set -> Set
+Nega x = x -> Unit
+
 data Giga : Nat -> Set where
    mkG : (n : Nat) -> Giga n -> Giga n
 
 data GigaBad : Nat -> Set where
-   mkG : (n : Nat) -> (GigaBad n -> Unit) -> GigaBad n
+   mkG : (n : Nat) -> ((GigaBad n) -> Unit) -> GigaBad n
+
+data GigaBadFixed : Nat -> Set where
+     mkG : (n : Nat) -> (Nega (GigaBadFixed n) -> Unit) -> GigaBadFixed n
 
 data GigaBadGood : Nat -> Set where
    mkG : (n : Nat) -> (GigaBadGood n -> Unit) -> GigaBadGood (s n)
