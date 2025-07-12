@@ -526,27 +526,28 @@ dataConsRec ctorName = do
         Def _ apps -> map (\case Apply a -> unArg a; _ -> __IMPOSSIBLE__) apps
         _          -> __IMPOSSIBLE__
 
-  -- Alecs: Bring in the scope the whole Pi argument telescope, this
-  --        is actually pretty awkward as some of the variables are
-  --        not actually in scope when looking at every argument that
-  --        is not the last one, but the other choice would be using
-  --        the pattern where some parts could be undefined
-  addContext piArguments $ do
+  -- Alecs: This is bad, we are constructing the pattern under the
+  --        whole scope which arguably is wrong but what else could we
+  --        do?
+  pat <- addContext piArguments $ do
     -- Contruct the pattern from the return type indexes
-    pat <- mapM termToPattern returnTypeCtorArgs >>= maskNonDataArgs
-    terSetPatterns pat $ do
-      graphs <- forM piArguments $ \arg -> do
-        let ?pos = PPositive
+    mapM termToPattern returnTypeCtorArgs >>= maskNonDataArgs
+
+  let scopedTerms = zip piArguments $ List.inits piArguments
+  terSetPatterns pat $ do
+    graphs <- forM scopedTerms $ \(arg, scope) -> do
+      addContext scope $ do
+        let ?polarity = Covariant
         let ?pol = Allow
         extract $ unDom arg
-      pure $ mconcat graphs
+    pure $ mconcat graphs
 
 -- | Extract "calls" to the field types from a record constructor telescope.
 -- Does not extract from the parameters, but treats these as the "pattern variables"
 -- (the lhs of the "function").
 termRecTel :: Nat -> Telescope -> TerM Calls
 termRecTel npars tel = do
-  let ?pos = PPositive
+  let ?polarity = Covariant
   let ?pol = Disallow
   -- Set up the record parameters like function parameters.
   let (pars, fields) = splitAt npars $ telToList tel
@@ -732,7 +733,7 @@ termClause clause = do
     terSetPatterns mdbpats $ do
       terSetSizeDepth tel $ do
         reportBody v
-        let ?pos = PPositive
+        let ?polarity = Covariant
         let ?pol = Disallow
         f <- extract v
         return f
@@ -755,24 +756,13 @@ termClause clause = do
             , nest 2 $ "rhs:" <+> prettyTCM v
             ]
 
-data PPosition
-  = PNegative | PPositive
-  deriving (Eq, Show)
-
-flipPosition :: Polarity -> PPosition -> PPosition
-flipPosition Contravariant PPositive = PNegative
-flipPosition Contravariant PNegative = PPositive
-flipPosition Covariant     pos       = pos
-flipPosition Invariant     _         = PNegative
-flipPosition Nonvariant    _         = PPositive
-
 data NonTerPolicy
   = Allow | Disallow
   deriving (Eq, Show)
 
 -- | Extract recursive calls from expressions.
 class ExtractCalls a where
-  extract :: (?pol :: NonTerPolicy, ?pos :: PPosition) => a -> TerM Calls
+  extract :: (?pol :: NonTerPolicy, ?polarity :: Polarity) => a -> TerM Calls
 
 instance ExtractCalls a => ExtractCalls (Abs a) where
   extract (NoAbs _ a) = extract a
@@ -837,7 +827,7 @@ instance ExtractCalls a => ExtractCalls (Tele a) where
 -- | Extract recursive calls from a constructor application.
 
 constructor
-  :: (?pol :: NonTerPolicy, ?pos :: PPosition)
+  :: (?pol :: NonTerPolicy, ?polarity :: Polarity)
   => QName
     -- ^ Constructor name.
   -> Induction
@@ -859,7 +849,7 @@ constructor c ind args = do
 
 -- | Handles function applications @g es@.
 
-function :: (?pol :: NonTerPolicy, ?pos :: PPosition)
+function :: (?pol :: NonTerPolicy, ?polarity :: Polarity)
          => QName -> Elims -> TerM Calls
 function g es0 = do
     f       <- terGetCurrent
@@ -880,10 +870,10 @@ function g es0 = do
     let guards = applyWhen isProj (guarded :) unguards
     -- Collect calls in the arguments of this call.
     let args = map unArg $ argsFromElims es0
-    calls <- forM' (zip3 guards args [0..]) $ \ (guard, a, pos) -> do
+    pol <- liftTCM $ getPolarity g
+    calls <- forM' (zip3 guards args pol) $ \ (guard, a, pol) -> do
       -- Here I get the polarity
-      pol <- liftTCM $ getArgOccurrence g pos
-      let ?pos = flipPosition (polFromOcc pol) ?pos
+      let ?polarity = composePol pol ?polarity
       terSetGuarded guard $ extract a
 
     -- Then, consider call gArgs itself.
@@ -895,7 +885,7 @@ function g es0 = do
 
     -- If we are in positive position and we allow non termination in
     -- positive postition then the call is fine no matter what
-    if ?pos == PPositive && ?pol == Allow then
+    if ?polarity `elem` [Covariant, Nonvariant] && ?pol == Allow then
       pure calls
     -- insert this call into the call list
     else case Set.lookupIndex g names of
@@ -1058,6 +1048,14 @@ tryReduceNonRecursiveClause g es continue fallback = do
       verboseS "term.reduce" 5 $ tick "termination-checker-reduced-nonrecursive-call"
       continue v
 
+
+modalPolarityToPolarity :: ModalPolarity -> Polarity
+modalPolarityToPolarity UnusedPolarity   = Nonvariant
+modalPolarityToPolarity StrictlyPositive = Covariant
+modalPolarityToPolarity Positive         = Covariant
+modalPolarityToPolarity Negative         = Contravariant
+modalPolarityToPolarity MixedPolarity    = Invariant
+
 -- | Extract recursive calls from a term.
 
 instance ExtractCalls Term where
@@ -1106,21 +1104,35 @@ instance ExtractCalls Term where
       Lam h b -> extract b
 
       -- Neutral term. Destroys guardedness.
-      Var i es -> terUnguarded $ extract es
+      Var i es -> do
+        -- Alecs: This is horrible :)
+        ty <- typeOfBV i
+        let (argsTy, _) = uncurryPi ty
+        let polArgs = map (modalPolarityToPolarity
+                          . modPolarityAnn
+                          . getModalPolarity) argsTy
+        -- Alecs: Maybe we need to expand the return type
+        --        to see all the argument
+        let args = zip es $ polArgs ++ repeat Invariant
+        graphs <- forM args $ \(arg, pol) -> do
+          let ?polarity = composePol pol ?polarity
+          terUnguarded $ extract arg
+        pure $ mconcat graphs
 
-      -- Dependent function space.
+
+      -- Dependent
       Pi a (Abs x b) ->
         CallGraph.union <$>
         extract a <*> do
           a <- do
-            let ?pos = flipPosition Contravariant ?pos
+            let ?polarity = composePol Contravariant ?polarity
             maskSizeLt a  -- OR: just do not add a to the context!
           addContext (x, a) $ terRaise $ extract b
 
       -- Non-dependent function space.
       Pi a (NoAbs _ b) -> do
         arg <- do
-          let ?pos = flipPosition Contravariant ?pos
+          let ?polarity = composePol Contravariant ?polarity
           extract a
         ret <- extract b
         pure $ CallGraph.union arg ret

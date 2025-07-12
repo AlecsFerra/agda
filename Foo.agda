@@ -1,4 +1,8 @@
+{-# OPTIONS --polarity #-}
+
 module Foo where
+
+open import Data.Product
 
 data Unit : Set where
   tt : Unit
@@ -17,20 +21,37 @@ Nega x = x -> Unit
 Pos : Set -> Set
 Pos x = Unit -> x
 
+data U : Nat -> Nat -> Set where
+
 data Giga : Nat -> Set where
    mkG : (n : Nat) -> Giga n -> Giga n
 
 data GigaBad : Nat -> Set where
-   mkG : (n : Nat) -> ((GigaBad n) -> Unit) -> GigaBad n
+   mkG : (n : Nat) -> (Pos (GigaBad n × Unit) -> Unit) -> GigaBad n
 
 data GigaBadFixed : Nat -> Set where
-     mkG : (n : Nat) -> (Nega (GigaBadFixed n) -> Unit) -> GigaBadFixed n
+     mkG : (n : Nat) -> (r : Nat) -> (Pos (Nega (Nega (Nega (GigaBadFixed n)))) -> Unit) -> (k : Nat) → (U r k) -> GigaBadFixed n
 
 data GigaBadGood : Nat -> Set where
-   mkG : (n : Nat) -> (GigaBadGood n -> Unit) -> GigaBadGood (s n)
+   mkG : (n : Nat) -> (r : Nat) -> (fr : GigaBadGood n -> Unit) -> GigaBadGood (s n)
 
 f : Unit -> Unit -> Unit
 f tt x = f x tt
+
+data Para (F : @++ Set → Set) : Set where
+  mkPara : (F (Para F)) → Para F
+
+data Zara (F : Set → Set) : Set where
+  mkPara : (F (Zara F)) → Zara F
+
+data Uara (F : @- Set → Set) : Set where
+  mkPara : (F (Nega (Uara F))) → Uara F
+
+postulate
+  F : @++ Set → Set
+
+data Mara : Set where
+  mkPara : (F Mara) → Mara
 
 data Ty : Set where
   ι : Ty
