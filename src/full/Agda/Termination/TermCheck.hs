@@ -58,7 +58,7 @@ import Agda.TypeChecking.Telescope
 
 import qualified Agda.Benchmarking as Benchmark
 import Agda.TypeChecking.Monad.Benchmark (billTo, billPureTo)
-import Agda.TypeChecking.Polarity
+import Agda.TypeChecking.Positivity.Occurrence
 
 import Agda.Interaction.Options
 
@@ -68,6 +68,7 @@ import Agda.Utils.Functor
 import Agda.Utils.List
 import Agda.Utils.Maybe
 import Agda.Utils.Monad -- (mapM', forM', ifM, or2M, and2M)
+import Agda.Utils.SemiRing
 import Agda.Utils.Null
 import Agda.Syntax.Common.Pretty (prettyShow)
 import Agda.Utils.Singleton
@@ -536,7 +537,7 @@ dataConsRec ctorName = do
       -- Compute how many bindings we are missing
       let args = zip (map snd boundArgs) $ boundNamesAt boundArgs
       graphs <- forM args $ \(arg, shift) -> do
-        let ?polarity = Covariant
+        let ?occ = JustPos
         let ?pol = Allow
         -- Here we reindex
         extract $ raise shift $ unDom arg
@@ -555,7 +556,7 @@ boundNamesAt l = case scanr ((+) . fromEnum . isJust . fst) 0 l of
 -- (the lhs of the "function").
 termRecTel :: Nat -> Telescope -> TerM Calls
 termRecTel npars tel = do
-  let ?polarity = Covariant
+  let ?occ = JustPos
   let ?pol = Disallow
   -- Set up the record parameters like function parameters.
   let (pars, fields) = splitAt npars $ telToList tel
@@ -741,7 +742,7 @@ termClause clause = do
     terSetPatterns mdbpats $ do
       terSetSizeDepth tel $ do
         reportBody v
-        let ?polarity = Covariant
+        let ?occ = JustPos
         let ?pol = Disallow
         f <- extract v
         return f
@@ -770,7 +771,7 @@ data NonTerPolicy
 
 -- | Extract recursive calls from expressions.
 class ExtractCalls a where
-  extract :: (?pol :: NonTerPolicy, ?polarity :: Polarity) => a -> TerM Calls
+  extract :: (?pol :: NonTerPolicy, ?occ :: Occurrence) => a -> TerM Calls
 
 instance ExtractCalls a => ExtractCalls (Abs a) where
   extract (NoAbs _ a) = extract a
@@ -835,7 +836,7 @@ instance ExtractCalls a => ExtractCalls (Tele a) where
 -- | Extract recursive calls from a constructor application.
 
 constructor
-  :: (?pol :: NonTerPolicy, ?polarity :: Polarity)
+  :: (?pol :: NonTerPolicy, ?occ :: Occurrence)
   => QName
     -- ^ Constructor name.
   -> Induction
@@ -857,13 +858,12 @@ constructor c ind args = do
 
 -- | Handles function applications @g es@.
 
-function :: (?pol :: NonTerPolicy, ?polarity :: Polarity)
+function :: (?pol :: NonTerPolicy, ?occ :: Occurrence)
          => QName -> Elims -> TerM Calls
 function g es0 = do
     f       <- terGetCurrent
     names   <- terGetMutual
     guarded <- terGetGuarded
-
 
     -- let gArgs = Def g es0
     liftTCM $ reportSDoc "term.function" 30 $
@@ -878,10 +878,10 @@ function g es0 = do
     let guards = applyWhen isProj (guarded :) unguards
     -- Collect calls in the arguments of this call.
     let args = map unArg $ argsFromElims es0
-    pol <- liftTCM $ getPolarity g
-    calls <- forM' (zip3 guards args pol) $ \ (guard, a, pol) -> do
+    calls <- forM' (zip3 guards args [0..]) $ \ (guard, a, idx) -> do
       -- Here I get the polarity
-      let ?polarity = composePol pol ?polarity
+      pol <- liftTCM $ getArgOccurrence g idx
+      let ?occ = otimes pol ?occ
       terSetGuarded guard $ extract a
 
     -- Then, consider call gArgs itself.
@@ -893,7 +893,7 @@ function g es0 = do
 
     -- If we are in positive position and we allow non termination in
     -- positive postition then the call is fine no matter what
-    if ?polarity `elem` [Covariant, Nonvariant] && ?pol == Allow then
+    if ?occ `elem` [JustPos, StrictPos, Unused] && ?pol == Allow then
       pure calls
     -- insert this call into the call list
     else case Set.lookupIndex g names of
@@ -1056,14 +1056,6 @@ tryReduceNonRecursiveClause g es continue fallback = do
       verboseS "term.reduce" 5 $ tick "termination-checker-reduced-nonrecursive-call"
       continue v
 
-
-modalPolarityToPolarity :: ModalPolarity -> Polarity
-modalPolarityToPolarity UnusedPolarity   = Nonvariant
-modalPolarityToPolarity StrictlyPositive = Covariant
-modalPolarityToPolarity Positive         = Covariant
-modalPolarityToPolarity Negative         = Contravariant
-modalPolarityToPolarity MixedPolarity    = Invariant
-
 -- | Extract recursive calls from a term.
 
 instance ExtractCalls Term where
@@ -1119,28 +1111,28 @@ instance ExtractCalls Term where
         --        arguments by accident, so just in case we treat them
         --        as if they were used invariantly, not sure it can
         --        actually happen
-        let args = zip es $ map getPol argsTy ++ repeat Invariant
+        let args = zip es $ map getPol argsTy ++ repeat Mixed
         graphs <- forM args $ \(arg, pol) -> do
-          let ?polarity = composePol pol ?polarity
+          let ?occ = otimes pol ?occ
           terUnguarded $ extract arg
         pure $ mconcat graphs
 
         -- Alecs: This feels pretty bad
-        where getPol = modalPolarityToPolarity . modPolarityAnn . getModalPolarity . snd
+        where getPol = modalPolarityToOccurrence . modPolarityAnn . getModalPolarity . snd
 
       -- Dependent
       Pi a (Abs x b) ->
         CallGraph.union <$>
         extract a <*> do
           a <- do
-            let ?polarity = composePol Contravariant ?polarity
+            let ?occ = otimes JustNeg ?occ
             maskSizeLt a  -- OR: just do not add a to the context!
           addContext (x, a) $ terRaise $ extract b
 
       -- Non-dependent function space.
       Pi a (NoAbs _ b) -> do
         arg <- do
-          let ?polarity = composePol Contravariant ?polarity
+          let ?occ = otimes JustNeg ?occ
           extract a
         ret <- extract b
         pure $ CallGraph.union arg ret

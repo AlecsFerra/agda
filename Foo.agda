@@ -53,7 +53,7 @@ postulate
   F : @++ Set → Set
 
 data Mara : Set where
---   mkPara : (F Mara) → Mara
+  mkPara : (F Mara) → Mara
 
 data Ty : Set where
   ι : Ty
