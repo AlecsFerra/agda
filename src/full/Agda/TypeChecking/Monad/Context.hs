@@ -1,4 +1,3 @@
-
 module Agda.TypeChecking.Monad.Context where
 
 import Data.Text (Text)

@@ -1039,10 +1039,12 @@ arity t = case unEl t of
   _       -> 0
 
 -- | Uncurry a Pi
--- unCurryPi A -> (B -> (C -> D)) === ([A, B, C], D)
-uncurryPi :: Type -> ([Dom Type], Type)
+uncurryPi :: Type -> ([(Maybe ArgName, Dom Type)], Type)
 uncurryPi t = case unEl t of
-  Pi dom cod -> (dom : args, ret) where (args, ret) = uncurryPi $ unAbs cod
+  Pi dom cod -> ((absName cod, dom) : args, ret)
+    where (args, ret) = uncurryPi $ unAbs cod
+          absName (Abs n _) = Just n
+          absName _         = Nothing
   _          -> ([], t)
 
 -- | Suggest a name if available (i.e. name is not "_")

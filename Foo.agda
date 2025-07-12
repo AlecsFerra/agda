@@ -33,7 +33,9 @@ data GigaBadFixed : Nat -> Set where
      mkG : (n : Nat) -> (r : Nat) -> (Pos (Nega (Nega (Nega (GigaBadFixed n)))) -> Unit) -> (k : Nat) → (U r k) -> GigaBadFixed n
 
 data GigaBadGood : Nat -> Set where
-   mkG : (n : Nat) -> (r : Nat) -> (fr : GigaBadGood n -> Unit) -> GigaBadGood (s n)
+   mkG : (n : Nat) -> (k : Nat) -> (unused : GigaBadGood n -> Unit)
+       -> (r : Nat) -> U n r -> U n k
+       -> GigaBadGood (s n)
 
 f : Unit -> Unit -> Unit
 f tt x = f x tt
@@ -51,7 +53,7 @@ postulate
   F : @++ Set → Set
 
 data Mara : Set where
-  mkPara : (F Mara) → Mara
+--   mkPara : (F Mara) → Mara
 
 data Ty : Set where
   ι : Ty

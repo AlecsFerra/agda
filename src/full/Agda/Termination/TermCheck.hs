@@ -518,9 +518,9 @@ termDef name = terSetCurrent name $ inConcreteOrAbstractMode name $ \ def -> do
 
 dataConsRec :: QName -> TerM Calls
 dataConsRec ctorName = do
-  (piArguments, piReturn) <- uncurryPi . defType <$>
-                              getConstInfo ctorName
-  let returnTypeCtorArgs = case unEl piReturn of
+  (boundArgs, returnTy) <- uncurryPi . defType <$> getConstInfo ctorName
+
+  let indexes = case unEl returnTy of
         -- Alecs: The return type of the constuctor should always be a
         --        data constructor application
         Def _ apps -> map (\case Apply a -> unArg a; _ -> __IMPOSSIBLE__) apps
@@ -528,19 +528,27 @@ dataConsRec ctorName = do
 
   -- Alecs: This is bad, we are constructing the pattern under the
   --        whole scope which arguably is wrong but what else could we
-  --        do?
-  pat <- addContext piArguments $ do
+  --        do? We will need to reindex the variables after
+  addContext (binders boundArgs) $ do
     -- Contruct the pattern from the return type indexes
-    mapM termToPattern returnTypeCtorArgs >>= maskNonDataArgs
-
-  let scopedTerms = zip piArguments $ List.inits piArguments
-  terSetPatterns pat $ do
-    graphs <- forM scopedTerms $ \(arg, scope) -> do
-      addContext scope $ do
+    pat <- mapM termToPattern indexes >>= maskNonDataArgs
+    terSetPatterns pat $ do
+      -- Compute how many bindings we are missing
+      let args = zip (map snd boundArgs) $ boundNamesAt boundArgs
+      graphs <- forM args $ \(arg, shift) -> do
         let ?polarity = Covariant
         let ?pol = Allow
-        extract $ unDom arg
-    pure $ mconcat graphs
+        -- Here we reindex
+        extract $ raise shift $ unDom arg
+      pure $ mconcat graphs
+
+binders :: [(Maybe a, b)] -> [(a, b)]
+binders = mapMaybe (\(ma, b) -> (,b) <$> ma)
+
+boundNamesAt :: [(Maybe a, b)] -> [Int]
+boundNamesAt l = case scanr ((+) . fromEnum . isJust . fst) 0 l of
+  _:xs -> xs
+  _    -> __IMPOSSIBLE__ -- scanr always return a non empty list
 
 -- | Extract "calls" to the field types from a record constructor telescope.
 -- Does not extract from the parameters, but treats these as the "pattern variables"
@@ -1104,21 +1112,21 @@ instance ExtractCalls Term where
       Lam h b -> extract b
 
       -- Neutral term. Destroys guardedness.
-      Var i es -> do
-        -- Alecs: This is horrible :)
-        ty <- typeOfBV i
-        let (argsTy, _) = uncurryPi ty
-        let polArgs = map (modalPolarityToPolarity
-                          . modPolarityAnn
-                          . getModalPolarity) argsTy
-        -- Alecs: Maybe we need to expand the return type
-        --        to see all the argument
-        let args = zip es $ polArgs ++ repeat Invariant
+      (Var i es) -> do
+        (argsTy, _) <- uncurryPi <$> typeOfBV i
+        -- Alecs: Since we for example we could be applying an arity
+        --        polymoprhic function we dont want to discard
+        --        arguments by accident, so just in case we treat them
+        --        as if they were used invariantly, not sure it can
+        --        actually happen
+        let args = zip es $ map getPol argsTy ++ repeat Invariant
         graphs <- forM args $ \(arg, pol) -> do
           let ?polarity = composePol pol ?polarity
           terUnguarded $ extract arg
         pure $ mconcat graphs
 
+        -- Alecs: This feels pretty bad
+        where getPol = modalPolarityToPolarity . modPolarityAnn . getModalPolarity . snd
 
       -- Dependent
       Pi a (Abs x b) ->
