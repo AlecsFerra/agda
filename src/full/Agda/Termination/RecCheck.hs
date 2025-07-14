@@ -40,8 +40,6 @@ import Agda.TypeChecking.CompiledClause
 
 import Agda.Utils.Impossible
 
--- import Debug.Trace
-
 -- | The mutual block we are checking.
 --
 --   The functions are numbered according to their order of appearance
@@ -60,11 +58,9 @@ type NamesPerClause = IntMap (Set QName)
 --   clauses belonging to the given functions.
 recursive :: Set QName -> TCM [MutualNames]
 recursive names = do
-  -- traceShowM ("Recursive for", prettyShow names)
   let names' = toList names
   -- For each function, get names per clause and total.
   (perClauses, nss) <- unzip <$> mapM (recDef (`Set.member` names)) names'
-  -- traceShowM ("out", prettyShow (perClauses, nss))
 
   -- Create graph suitable for stronglyConnComp.
   -- Nodes are identical to node keys.
@@ -132,10 +128,6 @@ recDef include name = do
   -- Retrieve definition
   def <- getConstInfo name
 
-
-  -- traceShowM ("recDef", prettyShow name)
-  -- traceShowM ("definition", prettyShow $ theDef def)
-
   -- Get names in type
   ns1 <- anyDefs include (defType def)
 
@@ -149,11 +141,9 @@ recDef include name = do
       return (IntMap.fromList perClause, mconcat $ map snd perClause)
 
     Datatype{ dataClause, dataCons } -> do
-      -- traceShowM ("lookging at dtdecl ", prettyShow name)
-
       inc <- forM dataCons $ \ctorName -> do
         ctorType <- defType <$> getConstInfo ctorName
-        let (_, args) = unCtor $ unEl ctorType
+        let (_, args) = uncurryPi ctorType
         anyDefs include args
 
       ns <- case dataClause of
@@ -176,14 +166,6 @@ recDef include name = do
     , "  names in the def:  " ++ prettyShow ns2
     ]
   return (perClause, ns1 `mappend` ns2)
-
-
-
-unCtor :: Term -> (Term, [Term])
-unCtor (Pi dom cod) = let (ret, args) = unCtor $ unEl $ unAbs cod
-                       in (ret, unEl (unDom dom) : args)
-unCtor t = (t, [])
-
 
 -- | @anysDef names a@ returns all definitions from @names@
 --   that are used in @a@.
