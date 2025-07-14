@@ -1105,20 +1105,17 @@ instance ExtractCalls Term where
 
       -- Neutral term. Destroys guardedness.
       (Var i es) -> do
-        (argsTy, _) <- uncurryPi <$> typeOfBV i
         -- Alecs: Since we for example we could be applying an arity
         --        polymoprhic function we dont want to discard
         --        arguments by accident, so just in case we treat them
         --        as if they were used invariantly, not sure it can
         --        actually happen
-        let args = zip es $ map getPol argsTy ++ repeat Mixed
+        occs <- typeOfBV i >>= liftTCM . getOccurrencesFromType
+        let args = zip es $ occs ++ repeat Mixed
         graphs <- forM args $ \(arg, pol) -> do
           let ?occ = otimes pol ?occ
           terUnguarded $ extract arg
         pure $ mconcat graphs
-
-        -- Alecs: This feels pretty bad
-        where getPol = modalPolarityToOccurrence . modPolarityAnn . getModalPolarity . snd
 
       -- Dependent
       Pi a (Abs x b) ->
