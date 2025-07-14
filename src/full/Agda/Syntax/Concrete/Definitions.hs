@@ -150,10 +150,10 @@ declKind :: NiceDeclaration -> DeclKind
 declKind (FunSig r _ _ _ _ _ tc cc x _)      = LoneSigDecl r (FunName tc cc) x
 declKind (NiceRecSig r _ _ _ pc uc x _ _)    = LoneSigDecl r (RecName pc uc) x
 declKind (NiceDataSig r _ _ _ pc uc x _ _)   = LoneSigDecl r (DataName pc uc) x
-declKind (FunDef r _ abs ins tc cc x _)      = LoneDefs (FunName tc cc) [x]
-declKind (NiceDataDef _ _ _ pc uc x pars _)  = LoneDefs (DataName pc uc) [x]
+declKind (FunDef _r _ _ _ tc cc x _)         = LoneDefs (FunName tc cc) [x]
+declKind (NiceDataDef _ _ _ pc uc x _par _)  = LoneDefs (DataName pc uc) [x]
 declKind (NiceUnquoteData _ _ _ pc uc x _ _) = LoneDefs (DataName pc uc) [x]
-declKind (NiceRecDef _ _ _ pc uc x _ pars _) = LoneDefs (RecName pc uc) [x]
+declKind (NiceRecDef _ _ _ pc uc x _ _par _) = LoneDefs (RecName pc uc) [x]
 declKind (NiceUnquoteDef _ _ _ tc cc xs _)   = LoneDefs (FunName tc cc) xs
 declKind Axiom{}                             = OtherDecl
 declKind NiceField{}                         = OtherDecl
@@ -171,18 +171,18 @@ declKind NiceUnquoteDecl{}                   = OtherDecl
 declKind NiceLoneConstructor{}               = OtherDecl
 declKind NiceOpaque{}                        = OtherDecl
 
--- | Replace (Data/Rec/Fun)Sigs with Axioms for postulated names
+-- | Replace @(Data/Rec/Fun)Sigs@ with @Axiom@s for postulated names.
 --   The first argument is a list of axioms only.
 replaceSigs
-  :: LoneSigs               -- ^ Lone signatures to be turned into Axioms
-  -> [NiceDeclaration]      -- ^ Declarations containing them
-  -> [NiceDeclaration]      -- ^ In the output, everything should be defined
+  :: LoneSigs               -- ^ Lone signatures to be turned into Axioms.
+  -> [NiceDeclaration]      -- ^ Declarations containing them.
+  -> [NiceDeclaration]      -- ^ In the output, everything should be defined.
 replaceSigs ps = if Map.null ps then id else \case
   []     -> __IMPOSSIBLE__
   (d:ds) ->
     case replaceable d of
       -- If declaration d of x is mentioned in the map of lone signatures then replace
-      -- it with an axiom
+      -- it with an axiom.
       Just (x, axiom)
         | (Just (LoneSig _ x' _), ps') <- Map.updateLookupWithKey (\ _ _ -> Nothing) x ps
         , getRange x == getRange x'
@@ -197,19 +197,19 @@ replaceSigs ps = if Map.null ps then id else \case
     -- @Axiom@ out of it.
     replaceable :: NiceDeclaration -> Maybe (Name, NiceDeclaration)
     replaceable = \case
-      FunSig r acc abst inst _ argi _ _ x' e ->
+      FunSig r acc abst inst _ argi _ _ x' e -> do
         -- #4881: Don't use the unique NameId for NoName lookups.
-        let x = if isNoName x' then noName (nameRange x') else x' in
-        Just (x, Axiom r acc abst inst (setOrigin Inserted argi) x' e)
-      NiceRecSig r erased acc abst _ _ x pars t ->
-        let e = Generalized $ makePi (lamBindingsToTelescope r pars) t in
-        Just (x, Axiom r acc abst NotInstanceDef
-                   (setOrigin Inserted (setQuantity (asQuantity erased) defaultArgInfo)) x e)
-      NiceDataSig r erased acc abst _ _ x pars t ->
-        let e = Generalized $ makePi (lamBindingsToTelescope r pars) t in
-        Just (x, Axiom r acc abst NotInstanceDef
-                   (setOrigin Inserted (setQuantity (asQuantity erased) defaultArgInfo)) x e)
+        let x = if isNoName x' then noName (nameRange x') else x'
+        let ai = setOrigin Inserted argi
+        Just (x, Axiom r acc abst inst ai x' e)
+      NiceRecSig  r erased acc abst _ _ x pars t -> retAx r erased acc abst x pars t
+      NiceDataSig r erased acc abst _ _ x pars t -> retAx r erased acc abst x pars t
       _ -> Nothing
+      where
+        retAx r erased acc abst x pars t = do
+          let e = Generalized $ makePi (lamBindingsToTelescope r pars) t
+          let ai = setOrigin Inserted (setQuantity (asQuantity erased) defaultArgInfo)
+          return (x, Axiom r acc abst NotInstanceDef ai x e)
 
 -- | Main. Fixities (or more precisely syntax declarations) are needed when
 --   grouping function clauses.
@@ -290,7 +290,8 @@ niceDeclarations fixs ds = do
 
       case d of
 
-        TypeSig info _tac x t -> do
+        TypeSig info tac x t -> do
+          dropTactic tac
           termCheck <- use terminationCheckPragma
           covCheck  <- use coverageCheckPragma
           -- Andreas, 2020-09-28, issue #4950: take only range of identifier,
@@ -316,7 +317,7 @@ niceDeclarations fixs ds = do
             _ -> __IMPOSSIBLE__
           return (gs, ds)
 
-        (FunClause lhs _ _ _)         -> do
+        FunClause lhs _ _ _ -> do
           termCheck <- use terminationCheckPragma
           covCheck  <- use coverageCheckPragma
           catchall  <- popCatchallPragma
@@ -325,11 +326,11 @@ niceDeclarations fixs ds = do
           -- if we have some clauses for 'x'
           case [ (x, (x', fits, rest))
                | (x, x') <- xs
-               , let (fits, rest) =
+               , let (fits0, rest) =
                       -- Anonymous declarations only have 1 clause each!
                       if isNoName x then ([d], ds)
                       else span (couldBeFunClauseOf (Map.lookup x fixs) x) (d : ds)
-               , not (null fits)
+               , fits <- maybeToList $ List1.nonEmpty fits0
                ] of
 
             -- case: clauses match none of the sigs
@@ -349,8 +350,8 @@ niceDeclarations fixs ds = do
             [(x,(x',fits,rest))] -> do
                -- The x'@NoName{} is the unique version of x@NoName{}.
                removeLoneSig x
-               ds  <- expandEllipsis fits
-               cs  <- mkClauses x' ds empty
+               ds  <- expandEllipsis1 fits
+               cs  <- mkClauses1 x' ds empty
                return ([FunDef (getRange fits) fits ConcreteDef NotInstanceDef termCheck covCheck x' cs] , rest)
 
             -- case: clauses match more than one sigs (ambiguity)
@@ -541,66 +542,82 @@ niceDeclarations fixs ds = do
 
         Unfolding r _ -> declarationException $ UnfoldingOutsideOpaque r
 
-    nicePragma :: Pragma -> [Declaration] -> Nice ([NiceDeclaration], [Declaration])
+    -- Some pragmas attach to the following declarations,
+    -- handle this situation here.
 
-    nicePragma (TerminationCheckPragma r (TerminationMeasure _ x)) ds =
+    nicePragma :: Pragma -> [Declaration] -> Nice ([NiceDeclaration], [Declaration])
+    nicePragma p ds = case p of
+
+     TerminationCheckPragma r NoTerminationCheck -> do
+      -- This PRAGMA has been deprecated in favour of (NON_)TERMINATING
+      -- We warn the user about it and then assume the function is NON_TERMINATING.
+      declarationWarning $ PragmaNoTerminationCheck r
+      nicePragma (TerminationCheckPragma r NonTerminating) ds
+
+     TerminationCheckPragma r (TerminationMeasure _ x) ->
       if canHaveTerminationMeasure ds then
         withTerminationCheckPragma (TerminationMeasure r x) $ nice1 ds
       else do
         declarationWarning $ InvalidTerminationCheckPragma r
         nice1 ds
 
-    nicePragma (TerminationCheckPragma r NoTerminationCheck) ds = do
-      -- This PRAGMA has been deprecated in favour of (NON_)TERMINATING
-      -- We warn the user about it and then assume the function is NON_TERMINATING.
-      declarationWarning $ PragmaNoTerminationCheck r
-      nicePragma (TerminationCheckPragma r NonTerminating) ds
-
-    nicePragma (TerminationCheckPragma r tc) ds =
+     TerminationCheckPragma r tc ->
       if canHaveTerminationCheckPragma ds then
         withTerminationCheckPragma tc $ nice1 ds
       else do
         declarationWarning $ InvalidTerminationCheckPragma r
         nice1 ds
 
-    nicePragma (NoCoverageCheckPragma r) ds =
+     NoCoverageCheckPragma r ->
       if canHaveCoverageCheckPragma ds then
         withCoverageCheckPragma NoCoverageCheck $ nice1 ds
       else do
         declarationWarning $ InvalidCoverageCheckPragma r
         nice1 ds
 
-    nicePragma (CatchallPragma r) ds =
+     CatchallPragma r ->
       if canHaveCatchallPragma ds then
         withCatchallPragma (YesCatchall r) $ nice1 ds
       else do
         declarationWarning $ InvalidCatchallPragma r
         nice1 ds
 
-    nicePragma (NoPositivityCheckPragma r) ds =
+     NoPositivityCheckPragma r ->
       if canHaveNoPositivityCheckPragma ds then
         withPositivityCheckPragma NoPositivityCheck $ nice1 ds
       else do
         declarationWarning $ InvalidNoPositivityCheckPragma r
         nice1 ds
 
-    nicePragma (NoUniverseCheckPragma r) ds =
+     NoUniverseCheckPragma r ->
       if canHaveNoUniverseCheckPragma ds then
         withUniverseCheckPragma NoUniverseCheck $ nice1 ds
       else do
         declarationWarning $ InvalidNoUniverseCheckPragma r
         nice1 ds
 
-    nicePragma p@CompilePragma{} ds = do
-      return ([NicePragma (getRange p) p], ds)
+     -- Polarity pragmas have been handled with fixity declarations, can be deleted.
+     PolarityPragma{} -> return ([], ds)
 
-    nicePragma (PolarityPragma{}) ds = return ([], ds)
+     -- The other pragmas are less context-sensitive, so nothing to do:
+     BuiltinPragma{}               -> keep
+     CompilePragma{}               -> keep
+     DisplayPragma{}               -> keep
+     EtaPragma{}                   -> keep
+     ForeignPragma{}               -> keep
+     ImpossiblePragma{}            -> keep
+     InjectiveForInferencePragma{} -> keep
+     InjectivePragma{}             -> keep
+     InlinePragma{}                -> keep
+     NotProjectionLikePragma{}     -> keep
+     OptionsPragma{}               -> keep
+     OverlapPragma{}               -> keep
+     RewritePragma{}               -> keep
+     StaticPragma{}                -> keep
+     WarningOnImport{}             -> keep
+     WarningOnUsage{}              -> keep
 
-    nicePragma (BuiltinPragma r str qn@(QName x)) ds = do
-      return ([NicePragma r (BuiltinPragma r str qn)], ds)
-
-    nicePragma p@RewritePragma{} ds = return ([NicePragma (getRange p) p], ds)
-    nicePragma p ds = return ([NicePragma (getRange p) p], ds)
+     where keep = return ([NicePragma (getRange p) p], ds)
 
     canHaveTerminationMeasure :: [Declaration] -> Bool
     canHaveTerminationMeasure [] = False
@@ -666,7 +683,7 @@ niceDeclarations fixs ds = do
     -- We could add a default type signature here, but at the moment we can't
     -- infer the type of a record or datatype, so better to just fail here.
     defaultTypeSig :: DataRecOrFun -> Name -> Maybe Expr -> Nice (Maybe Expr)
-    defaultTypeSig k x t@Just{} = return t
+    defaultTypeSig _ _ t@Just{} = return t
     defaultTypeSig k x Nothing  = do
       caseMaybeM (getSig x) (return Nothing) $ \ k' -> do
         unless (sameKind k k') $ declarationException $ WrongDefinition x k' k
@@ -706,7 +723,8 @@ niceDeclarations fixs ds = do
 
     niceAxiom :: KindOfBlock -> TypeSignatureOrInstanceBlock -> Nice [NiceDeclaration]
     niceAxiom b = \case
-      d@(TypeSig rel _tac x t) -> do
+      d@(TypeSig rel tac x t) -> do
+        dropTactic tac
         return [ Axiom (getRange d) PublicAccess ConcreteDef NotInstanceDef rel x t ]
       d@(FieldSig i tac x argt) | b == FieldBlock -> do
         return [ NiceField (getRange d) PublicAccess ConcreteDef i tac x argt ]
@@ -719,13 +737,21 @@ niceDeclarations fixs ds = do
       d -> declarationException $ WrongContentBlock b $ getRange d
 
     toPrim :: NiceDeclaration -> NiceDeclaration
-    toPrim (Axiom r p a i rel x t) = PrimitiveFunction r p a x (Arg rel t)
-    toPrim _                       = __IMPOSSIBLE__
+    toPrim (Axiom r p a NotInstanceDef rel x t) = PrimitiveFunction r p a x (Arg rel t)
+    toPrim _ = __IMPOSSIBLE__
 
     -- Create a function definition.
+    mkFunDef ::
+         ArgInfo
+      -> TerminationCheck
+      -> CoverageCheck
+      -> Name
+      -> Maybe Expr
+      -> List1 Declaration
+      -> Nice [NiceDeclaration]
     mkFunDef info termCheck covCheck x mt ds0 = do
-      ds <- expandEllipsis ds0
-      cs <- mkClauses x ds empty
+      ds <- expandEllipsis1 ds0
+      cs <- mkClauses1 x ds empty
       return [ FunSig (fuseRange x t) PublicAccess ConcreteDef NotInstanceDef NotMacroDef info termCheck covCheck x t
              , FunDef (getRange ds0) ds0 ConcreteDef NotInstanceDef termCheck covCheck x cs ]
         where
@@ -737,9 +763,12 @@ niceDeclarations fixs ds = do
     -- and then use its lhs pattern to replace ellipses in the subsequent clauses (if any).
     expandEllipsis :: [Declaration] -> Nice [Declaration]
     expandEllipsis [] = return []
-    expandEllipsis (d@(FunClause lhs@(LHS p _ _) _ _ _) : ds)
-      | hasEllipsis p = (d :) <$> expandEllipsis ds
-      | otherwise     = (d :) <$> expand (killRange p) ds
+    expandEllipsis (d : ds) = List1.toList <$> expandEllipsis1 (d :| ds)
+
+    expandEllipsis1 :: List1 Declaration -> Nice (List1 Declaration)
+    expandEllipsis1 (d@(FunClause (LHS p _ _) _ _ _) :| ds)
+      | hasEllipsis p = (d :|) <$> expandEllipsis ds
+      | otherwise     = (d :|) <$> expand (killRange p) ds
       where
         expand :: Pattern -> [Declaration] -> Nice [Declaration]
         expand _ [] = return []
@@ -766,14 +795,17 @@ niceDeclarations fixs ds = do
                   -- Need to update the range also on the next with-patterns.
                   (d :) <$> expand (if null es then p else killRange p0) ds
             _ -> __IMPOSSIBLE__
-    expandEllipsis _ = __IMPOSSIBLE__
+    expandEllipsis1 _ = __IMPOSSIBLE__
 
     -- Turn function clauses into nice function clauses.
+    mkClauses1 :: Name -> List1 Declaration -> Catchall -> Nice (List1 Clause)
+    mkClauses1 x ds ca = List1.fromListSafe __IMPOSSIBLE__ <$> mkClauses x (List1.toList ds) ca
+
     mkClauses :: Name -> [Declaration] -> Catchall -> Nice [Clause]
     mkClauses _ [] _ = return []
 
     -- A CATCHALL pragma after the last clause is useless.
-    mkClauses x [Pragma (CatchallPragma r)] _ = [] <$ do
+    mkClauses _ [Pragma (CatchallPragma r)] _ = [] <$ do
       declarationWarning $ InvalidCatchallPragma r
 
     mkClauses x (Pragma (CatchallPragma r) : cs) catchall = do
@@ -802,7 +834,7 @@ niceDeclarations fixs ds = do
          | isEllipsis p0 ||
            numberOfWithPatterns p0 >= numWith = mapFst (c:) (subClauses cs)
          | otherwise                           = ([], c:cs)
-        subClauses (c@(Pragma (CatchallPragma r)) : cs) = case subClauses cs of
+        subClauses (c@(Pragma (CatchallPragma _r)) : cs) = case subClauses cs of
           ([], cs') -> ([], c:cs')
           (cs, cs') -> (c:cs, cs')
         subClauses [] = ([],[])
@@ -845,7 +877,7 @@ niceDeclarations fixs ds = do
 
     -- for finding clauses for a type sig in mutual blocks
     couldBeFunClauseOf :: Maybe Fixity' -> Name -> Declaration -> Bool
-    couldBeFunClauseOf mFixity x (Pragma (CatchallPragma{})) = True
+    couldBeFunClauseOf _ _ (Pragma (CatchallPragma{})) = True
     couldBeFunClauseOf mFixity x (FunClause (LHS p _ _) _ _ _) =
        hasEllipsis p || couldBeCallOf mFixity x p
     couldBeFunClauseOf _ _ _ = False -- trace ("couldBe not (fun default)") $ False
@@ -857,7 +889,7 @@ niceDeclarations fixs ds = do
       -> [NiceDeclaration]     -- Declarations inside the block.
       -> Nice NiceDeclaration  -- Returns a 'NiceMutual'.
     mkInterleavedMutual kwr ds' = do
-      (other, (m, checks, _)) <- runStateT (groupByBlocks kwr ds') (empty, mempty, 0)
+      (other, ISt m checks _) <- runStateT (groupByBlocks kwr ds') $ ISt empty mempty 0
       let idecls = other ++ concatMap (uncurry interleavedDecl) (Map.toList m)
       let decls0 = map snd $ List.sortBy (compare `on` fst) idecls
       ps <- use loneSigs
@@ -874,19 +906,18 @@ niceDeclarations fixs ds = do
 
         ------------------------------------------------------------------------------
         -- Adding Signatures
-        addType :: Name -> (DeclNum -> a) -> MutualChecks
-                -> StateT (Map Name a, MutualChecks, DeclNum) Nice ()
+        addType :: Name -> (DeclNum -> InterleavedDecl) -> MutualChecks -> INice ()
         addType n c mc = do
-          (m, checks, i) <- get
+          ISt m checks i <- get
           when (isJust $ Map.lookup n m) $ lift $ declarationException $ DuplicateDefinition n
-          put (Map.insert n (c i) m, mc <> checks, i + 1)
+          put $ ISt (Map.insert n (c i) m) (mc <> checks) (i + 1)
 
         addFunType d@(FunSig _ _ _ _ _ _ tc cc n _) = do
            let checks = MutualChecks [tc] [cc] []
            addType n (\ i -> InterleavedFun i d Nothing) checks
         addFunType _ = __IMPOSSIBLE__
 
-        addDataType d@(NiceDataSig _ _ _ _ pc uc n _ _) = do
+        addDataType d@(NiceDataSig _ _ _ _ pc _uc n _ _) = do
           let checks = MutualChecks [] [] [pc]
           addType n (\ i -> InterleavedData i d Nothing) checks
         addDataType _ = __IMPOSSIBLE__
@@ -897,10 +928,10 @@ niceDeclarations fixs ds = do
         addDataConstructors :: Maybe Range        -- Range of the `data A where` (if any)
                             -> Maybe Name         -- Data type the constructors belong to
                             -> [NiceConstructor]  -- Constructors to add
-                            -> StateT (InterleavedMutual, MutualChecks, DeclNum) Nice ()
+                            -> INice ()
         -- if we know the type's name, we can go ahead
         addDataConstructors mr (Just n) ds = do
-          (m, checks, i) <- get
+          ISt m checks i <- get
           case Map.lookup n m of
             Just (InterleavedData i0 sig cs) -> do
               lift $ removeLoneSig n
@@ -908,7 +939,7 @@ niceDeclarations fixs ds = do
               let (cs', i') = case cs of
                     Nothing        -> ((i , ds :| [] ), i + 1)
                     Just (i1, ds1) -> ((i1, ds <| ds1), i)
-              put (Map.insert n (InterleavedData i0 sig (Just cs')) m, checks, i')
+              put $ ISt (Map.insert n (InterleavedData i0 sig (Just cs')) m) checks i'
             _ -> lift $ declarationWarning $ MissingDataDeclaration n
 
         addDataConstructors mr Nothing [] = pure ()
@@ -916,7 +947,7 @@ niceDeclarations fixs ds = do
         -- Otherwise we try to guess which datasig the constructor is referring to
         addDataConstructors mr Nothing (d : ds) = do
           -- get the candidate data types that are in this interleaved mutual block
-          (m, _, _) <- get
+          ISt m _ _ <- get
           let sigs = mapMaybe (\ (n, d) -> n <$ isInterleavedData d) $ Map.toList m
           -- check whether this constructor matches any of them
           case isConstructor sigs d of
@@ -928,51 +959,47 @@ niceDeclarations fixs ds = do
               addDataConstructors Nothing Nothing ds1
             Left (n, ns) -> lift $ declarationException $ AmbiguousConstructor (getRange d) n ns
 
-        addFunDef :: NiceDeclaration -> StateT (InterleavedMutual, MutualChecks, DeclNum) Nice ()
+        addFunDef :: NiceDeclaration -> INice ()
         addFunDef (FunDef _ ds _ _ tc cc n cs) = do
-          let check = MutualChecks [tc] [cc] []
-          (m, checks, i) <- get
+          addInterleavedFun n ds cs $ MutualChecks [tc] [cc] []
+        addFunDef _ = __IMPOSSIBLE__
+
+        addInterleavedFun :: Name -> List1 Declaration -> List1 Clause -> MutualChecks -> INice ()
+        addInterleavedFun n ds cs checks' = do
+          ISt m checks i <- get
           case Map.lookup n m of
             Just (InterleavedFun i0 sig cs0) -> do
               let (cs', i') = case cs0 of
                     Nothing        -> ((i,  (ds, cs) :| [] ), i + 1)
                     Just (i1, cs1) -> ((i1, (ds, cs) <| cs1), i)
-              put (Map.insert n (InterleavedFun i0 sig (Just cs')) m, check <> checks, i')
+              put $ ISt (Map.insert n (InterleavedFun i0 sig (Just cs')) m) (checks' <> checks) i'
             _ -> __IMPOSSIBLE__ -- A FunDef always come after an existing FunSig!
-        addFunDef _ = __IMPOSSIBLE__
 
         addFunClauses ::
              KwRange
           -> [NiceDeclaration]
-          -> StateT (InterleavedMutual, MutualChecks, DeclNum) Nice [(DeclNum, NiceDeclaration)]
+          -> INice [(DeclNum, NiceDeclaration)]
         addFunClauses r (nd@(NiceFunClause _ _ _ tc cc _ d@(FunClause lhs _ _ _)) : ds) = do
           -- get the candidate functions that are in this interleaved mutual block
-          (m, checks, i) <- get
+          ISt m checks i <- get
           let sigs = mapMaybe (\ (n, d) -> n <$ isInterleavedFun d) $ Map.toList m
           -- find the funsig candidates for the funclause of interest
           case [ (x, fits, rest)
                | x <- sigs
-               , let (fits, rest) = spanJust (couldBeNiceFunClauseOf (Map.lookup x fixs) x) (nd : ds)
-               , not (null fits)
+               , let (fits0, rest) = spanJust (couldBeNiceFunClauseOf (Map.lookup x fixs) x) (nd : ds)
+               , fits <- maybeToList $ List1.nonEmpty fits0
                ] of
             -- no candidate: keep the isolated fun clause, we'll complain about it later
             [] -> do
               let check = MutualChecks [tc] [cc] []
-              put (m, check <> checks, i + 1)
+              put $ ISt m (check <> checks) (i + 1)
               ((i,nd) :) <$> groupByBlocks r ds
             -- exactly one candidate: attach the funclause to the definition
             [(n, fits0, rest)] -> do
-              let (checkss, fits) = unzip fits0
-              ds <- lift $ expandEllipsis fits
-              cs <- lift $ mkClauses n ds empty
-              case Map.lookup n m of
-                Just (InterleavedFun i0 sig cs0) -> do
-                  let (cs', i') = case cs0 of
-                        Nothing        -> ((i,  (fits,cs) :| [] ), i + 1)
-                        Just (i1, cs1) -> ((i1, (fits,cs) <| cs1), i)
-                  let checks' = Fold.fold checkss
-                  put (Map.insert n (InterleavedFun i0 sig (Just cs')) m, checks' <> checks, i')
-                _ -> __IMPOSSIBLE__
+              let (checkss, fits) = List1.unzip fits0
+              ds <- lift $ expandEllipsis1 fits
+              cs <- lift $ mkClauses1 n ds empty
+              addInterleavedFun n fits {- or? ds -} cs $ Fold.fold checkss
               groupByBlocks r rest
             -- more than one candidate: fail, complaining about the ambiguity!
             xf:xfs -> lift $ declarationException
@@ -983,7 +1010,7 @@ niceDeclarations fixs ds = do
         groupByBlocks ::
               KwRange
           -> [NiceDeclaration]
-          -> StateT (InterleavedMutual, MutualChecks, DeclNum) Nice [(DeclNum, NiceDeclaration)]
+          -> INice [(DeclNum, NiceDeclaration)]
         groupByBlocks kwr []       = pure []
         groupByBlocks kwr (d : ds) = do
           -- for most branches we deal with the one declaration and move on
@@ -1001,8 +1028,8 @@ niceDeclarations fixs ds = do
             -- We do not need to worry about RecSig vs. RecDef: we know there's exactly one
             -- of each for record definitions and leaving them in place should be enough!
             _ -> oneOff $ do
-              (m, c, i) <- get -- TODO: grab checks from c?
-              put (m, c, i + 1)
+              ISt m c i <- get -- TODO: grab checks from c?
+              put $ ISt m c (i + 1)
               pure [(i,d)]
 
     -- Extract the name of the return type (if any) of a potential constructor.
@@ -1255,8 +1282,8 @@ niceDeclarations fixs ds = do
         unless inherited $ declarationWarning $ UselessAbstract r
         return ds -- no change!
 
-    privateBlock
-      :: KwRange  -- Range of @private@ keyword.
+    privateBlock ::
+         KwRange  -- Range of @private@ keyword.
       -> Origin   -- Origin of the private block.
       -> [NiceDeclaration]
       -> Nice [NiceDeclaration]
@@ -1273,8 +1300,8 @@ niceDeclarations fixs ds = do
       where
         warn = declarationWarning $ UselessPrivate r
 
-    instanceBlock
-      :: KwRange  -- Range of @instance@ keyword.
+    instanceBlock ::
+         KwRange  -- Range of @instance@ keyword.
       -> [NiceDeclaration]
       -> Nice [NiceDeclaration]
     instanceBlock r ds = do
@@ -1284,8 +1311,8 @@ niceDeclarations fixs ds = do
         return ds -- no change!
 
     -- Make a declaration eligible for instance search.
-    mkInstance
-      :: KwRange  -- Range of @instance@ keyword.
+    mkInstance ::
+         KwRange  -- Range of @instance@ keyword.
       -> Updater NiceDeclaration
     mkInstance r0 = \case
         Axiom r p a i rel x e          -> (\ i -> Axiom r p a i rel x e) <$> setInstance r0 i
@@ -1361,6 +1388,7 @@ class MakeAbstract a where
   mkAbstract = traverse . mkAbstract
 
 instance MakeAbstract a => MakeAbstract [a]
+instance MakeAbstract a => MakeAbstract (List1 a)
 
 -- Leads to overlap with 'WhereClause':
 -- instance (Traversable f, MakeAbstract a) => MakeAbstract (f a) where
@@ -1444,6 +1472,7 @@ class MakePrivate a where
   mkPrivate kwr o = traverse $ mkPrivate kwr o
 
 instance MakePrivate a => MakePrivate [a]
+instance MakePrivate a => MakePrivate (List1 a)
 
 -- Leads to overlap with 'WhereClause':
 -- instance (Traversable f, MakePrivate a) => MakePrivate (f a) where
@@ -1505,6 +1534,13 @@ instance MakePrivate WhereClause where
     SomeWhere r e m a ds ->
       mkPrivate kwr o a <&> \a' -> SomeWhere r e m a' ds
 
+-- | Make sure that the 'TacticAttribute' is empty.
+dropTactic :: TacticAttribute -> Nice ()
+dropTactic = \case
+  TacticAttribute Nothing   -> return ()
+  TacticAttribute (Just re) -> declarationWarning $ InvalidTacticAttribute $ getRange re
+
+
 -- The following function is (at the time of writing) only used three
 -- times: for building Lets, and for printing error messages.
 
@@ -1527,7 +1563,7 @@ notSoNiceDeclarations = \case
     NiceDataSig r er _ _ _ _ x bs e  -> singleton $ DataSig r er x bs e
     NiceFunClause _ _ _ _ _ _ d      -> singleton $ d
     FunSig _ _ _ i _ rel _ _ x e     -> inst i $ TypeSig rel empty x e
-    FunDef _ ds _ _ _ _ _ _          -> List1.fromListSafe __IMPOSSIBLE__ ds -- TODO: use List1 in type of FunDef
+    FunDef _ ds _ _ _ _ _ _          -> ds
     NiceDataDef r _ _ _ _ x bs cs    -> singleton $ DataDef r x bs $ List1.concat $ fmap notSoNiceDeclarations cs
     NiceRecDef r _ _ _ _ x dir bs ds -> singleton $ RecordDef r x dir bs ds
     NicePatternSyn r _ n as p        -> singleton $ PatternSyn r n as p

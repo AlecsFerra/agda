@@ -69,7 +69,7 @@ data NiceDeclaration
     --   without type signature or a pattern lhs (e.g. for irrefutable let).
     --   The 'Declaration' is the actual 'FunClause'.
   | FunSig Range Access IsAbstract IsInstance IsMacro ArgInfo TerminationCheck CoverageCheck Name Expr
-  | FunDef Range [Declaration] IsAbstract IsInstance TerminationCheck CoverageCheck Name [Clause]
+  | FunDef Range (List1 Declaration) IsAbstract IsInstance TerminationCheck CoverageCheck Name (List1 Clause)
       -- ^ Block of function clauses (we have seen the type signature before).
       --   The 'Declaration's are the original declarations that were processed
       --   into this 'FunDef' and are only used in 'notSoNiceDeclaration'.
@@ -159,9 +159,16 @@ data InterleavedDecl
         -- ^ Internal number of the function signature.
     , interleavedDeclSig  :: NiceDeclaration
         -- ^ The function signature.
-    , interleavedFunClauses :: Maybe (DeclNum, List1 ([Declaration],[Clause]))
+    , interleavedFunClauses :: Maybe (DeclNum, List1 (List1 Declaration, List1 Clause))
         -- ^ Function clauses associated to the function signature.
     }
+
+-- | Extra state for the 'Nice' monad to process interleaved mutual blocks.
+data InterleavedState = ISt
+  { interleavedMutual         :: InterleavedMutual
+  , interleavedMutualChecks   :: MutualChecks
+  , interleavedCurrentDeclNum :: DeclNum
+  }
 
 -- | Numbering declarations in an @interleaved mutual@ block.
 type DeclNum = Int
